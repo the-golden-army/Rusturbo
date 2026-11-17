@@ -1,0 +1,102 @@
+name: Publish to npm
+
+# Tokenless publishing via npm trusted publishing (OIDC).
+#
+# There is deliberately no NPM_TOKEN here: the job proves its identity to the registry
+# with a short-lived OIDC token minted by GitHub Actions, which is also what satisfies
+# npm's 2FA requirement for publishes.
+#
+# Prerequisites, once, on npmjs.com:
+#   Package -> Settings -> Trusted Publisher -> GitHub Actions
+#     Organization or user : the-golden-army
+#     Repository           : Rusturbo
+#     Workflow filename    : publish-npm.yml        (file name only, case sensitive)
+#     Allowed actions      : npm publish
+#   Note: a package must already exist before a trusted publisher can be attached, so the
+#   very first publish of a brand-new name needs one manual `npm publish` with 2FA.
+#
+# Requirements enforced by npm: GitHub-hosted runner, npm CLI >= 11.5.1,
+# `id-token: write`, and no NODE_AUTH_TOKEN on the publish step.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "npm publish --dry-run (no upload)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: npm publish
+    runs-on: ubuntu-latest
+    # Do not grant id-token at workflow scope: only this job may mint an npm identity.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm (OIDC needs >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Verify OIDC is available
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error title=oidc::No OIDC endpoint. Add 'id-token: write' to the publish job."
+            exit 1
+          fi
+          echo "OIDC endpoint available"
+
+      - name: Check package metadata against this repository
+        working-directory: packaging/npm
+        run: |
+          PKG_REPO=$(node -e "console.log(require('./package.json').repository.url)")
+          echo "package.json repository: $PKG_REPO"
+          echo "GITHUB_REPOSITORY:       $GITHUB_REPOSITORY"
+          case "$PKG_REPO" in
+            *"$GITHUB_REPOSITORY"*) ;;
+            *) echo "::error title=repo-mismatch::repository.url must match $GITHUB_REPOSITORY"; exit 1 ;;
+          esac
+
+      - name: Refuse to ship a checked-in binary
+        working-directory: packaging/npm
+        run: |
+          if git ls-files --error-unmatch bin/rusturbo bin/rusturbo.exe 2>/dev/null; then
+            echo "::error title=stub-binary::bin/rusturbo is tracked; it must only be downloaded at install time"
+            exit 1
+          fi
+          echo "no tracked binaries"
+
+      - name: Show what would ship
+        working-directory: packaging/npm
+        run: npm pack --dry-run
+
+      - name: Publish (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        working-directory: packaging/npm
+        run: npm publish --access public --dry-run
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        working-directory: packaging/npm
+        run: npm publish --access public
+
+      - name: Result
+        if: success()
+        run: |
+          VERSION=$(node -e "console.log(require('../home/runner/work/Rusturbo/Rusturbo/packaging/npm/package.json').version)" 2>/dev/null || true)
+          echo "Published rusturbo (see https://www.npmjs.com/package/rusturbo)"
+          echo "Verify with: npx rusturbo@latest --version"
