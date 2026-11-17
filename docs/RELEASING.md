@@ -46,13 +46,53 @@ Notes specific to this crate:
 
 ## 3. Publish to npm
 
+npm enforces 2FA on publishes, and a plain `npm login` session is **not** enough:
+
+```
+npm error 403 403 Forbidden - PUT https://registry.npmjs.org/rusturbo
+npm error Two-factor authentication or granular access token with bypass 2fa enabled is required
+```
+
+Two supported paths, in order of preference:
+
+### 3a. Trusted publishing from CI (recommended, no secrets)
+
+`.github/workflows/publish-npm.yml` publishes on every `v*` tag using GitHub Actions
+OIDC. Nothing is stored in the repo; the job's identity is the credential, which is what
+also satisfies npm's 2FA rule.
+
+One-time setup on npmjs.com → package **rusturbo** → *Settings* → *Trusted Publisher* →
+GitHub Actions:
+
+| Field | Value |
+|---|---|
+| Organization or user | `the-golden-army` |
+| Repository | `Rusturbo` |
+| Workflow filename | `publish-npm.yml` (file name only, no path) |
+| Allowed actions | `npm publish` |
+
+Then `git push origin v<version>` publishes to npm automatically.
+
+Constraints npm enforces: GitHub-hosted runner only, npm CLI ≥ 11.5.1, `id-token: write`
+on the publish job, and **no** `NODE_AUTH_TOKEN` on the publish step (it would force the
+legacy token path). A trusted publisher can be attached only to a package that already
+exists, so the *first* publish of a new name still needs one manual upload (3b).
+Unvalidated trusted-publisher configs expire 48 hours after creation.
+
+### 3b. Manual publish with 2FA
+
 ```bash
 cd packaging/npm
 npm version <same-version> --no-git-tag-version
-npm login                        # or set NPM_TOKEN
-npm publish --dry-run            # shows exactly which files ship
-npm publish --access public
+npm login
+npm profile enable-2fa auth-only      # required for publishes
+npm publish --access public --otp=<6-digit code>
 ```
+
+An automation/granular token must have *bypass 2FA* enabled to publish, and npm is
+restricting that capability — which is why 3a is preferred. Note also that npm 12 disables
+install scripts by default for consumers: this package's binary fetch cannot be assumed to
+run, and the shim prints a clear message when it did not.
 
 Order matters: the npm installer downloads
 `https://github.com/the-golden-army/Rusturbo/releases/download/v<version>/rusturbo-<target>`,
@@ -86,3 +126,5 @@ for the GitHub Release to finish before smoke-testing npm.
 - [ ] `docs/BENCHMARKS.md` regenerated on the release machine (numbers are machine-specific)
 - [ ] CI green on the release commit
 - [ ] `rusturbo --version` matches the tag
+- [ ] No binary committed under `packaging/npm/bin/` — only `rusturbo.js` ships; the
+      installer downloads the binary, and CI refuses to publish otherwise
