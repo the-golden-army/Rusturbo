@@ -81,18 +81,41 @@ Unvalidated trusted-publisher configs expire 48 hours after creation.
 
 ### 3b. Manual publish with 2FA
 
+First check what your account actually requires:
+
 ```bash
-cd packaging/npm
-npm version <same-version> --no-git-tag-version
-npm login
-npm profile enable-2fa auth-only      # required for publishes
-npm publish --access public --otp=<6-digit code>
+npm profile get        # look at "two-factor auth"
 ```
 
-An automation/granular token must have *bypass 2FA* enabled to publish, and npm is
-restricting that capability — which is why 3a is preferred. Note also that npm 12 disables
-install scripts by default for consumers: this package's binary fetch cannot be assumed to
-run, and the shim prints a clear message when it did not.
+| Value | Meaning for `npm publish` |
+|---|---|
+| `disabled` | No OTP exists to enter. The registry still demands a second factor, so `npm publish` returns **403 even though no code is possible** — enable 2FA first. |
+| `auth-only` | Login is protected; writes usually pass without an OTP. A 403 here means the write path needs one — use `--otp`. |
+| `auth-and-writes` | Publishing requires an OTP. Use `--otp`. |
+
+Enrol an authenticator once (prints recovery codes — store them):
+
+```bash
+npm profile enable-2fa auth-only
+```
+
+Publish:
+
+```bash
+cd packaging/npm
+npm login
+npm publish --access public --otp=<6-digit code from the authenticator>
+```
+
+**Do not disable 2FA to get past the 403.** npm blocks publishing from accounts
+without a second factor precisely so a stolen password cannot ship a package; disabling it
+does not unlock publishing.
+
+Alternative without TOTP: an automation/granular access token with *bypass 2FA* enabled
+(`NODE_AUTH_TOKEN`). npm is restricting that capability, which is why 3a is preferred.
+
+Note also that npm 12 disables install scripts by default for consumers: this package's
+binary fetch cannot be assumed to run, and the shim prints a clear message when it did not.
 
 Order matters: the npm installer downloads
 `https://github.com/the-golden-army/Rusturbo/releases/download/v<version>/rusturbo-<target>`,
