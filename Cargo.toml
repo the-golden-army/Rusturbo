@@ -1,6 +1,6 @@
 [package]
 name = "rusturbo"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.74"
 description = "RustTurbo — extreme Rust compilation accelerator: first-build acceleration, shared dependency artifact cache, linker engine and evidence-based benchmarking"
