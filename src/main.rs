@@ -54,8 +54,29 @@ struct Cli {
     quiet: bool,
 }
 
+/// Not a user-facing command.
+///
+/// `rusturbo run` is a three-way proxy — RustTurbo flags, Cargo flags, and the program's
+/// own flags — and no CLI grammar can disambiguate all three from a single `--`. Cargo
+/// solves this by forwarding everything after `--` to the program; we do the same, and
+/// this hidden subcommand is where those arguments land:
+///
+/// ```text
+/// rusturbo run --cargo-arg=--release -- host --port 9000
+/// ```
+///
+/// The `-- host` marker exists so this can never be confused with a real RustTurbo flag.
+#[derive(Args, Debug)]
+struct HostProxy {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    args: Vec<String>,
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Hidden: receives the program arguments after `--` in `run`/`build`.
+    #[command(hide = true)]
+    Host(HostProxy),
     /// Write rusturbo.toml with tuned defaults for this project.
     Init(InitArgs),
     /// Analyse the dependency graph, hardware and bottlenecks.
@@ -128,7 +149,17 @@ struct BuildArgs {
     /// Extra arguments forwarded to the built program (after `--`).
     #[arg(last = true)]
     passthrough: Vec<String>,
-    /// Extra arguments forwarded to Cargo itself.
+    /// Extra arguments forwarded to the built program, e.g. `rusturbo run -- --port 9000`.
+    ///
+    /// These are appended *after* Cargo's own `--`, so they reach the program and never
+    /// Cargo. Previously this field was declared `last = true`, which made clap treat
+    /// every `--` in the command line as the end of the flags — so `--cargo-arg` past
+    /// `--` was captured here and then forwarded to the program, not to Cargo.
+    #[arg(value_name = "PROGRAM_ARG")]
+    program_args: Vec<String>,
+
+    /// Extra arguments forwarded to Cargo itself, e.g. `rusturbo run -- -- --port 9000`
+    /// is not needed: use `--cargo-arg="--release"` style for Cargo.
     #[arg(long = "cargo-arg", value_name = "ARG")]
     cargo_args: Vec<String>,
 }
@@ -165,6 +196,23 @@ struct CleanArgs {
     all: bool,
 }
 
+/// Quote an argv vector for *display*. PowerShell/cmd split on spaces, so an unquoted
+/// echo of `--config profile.dev.package."*".debug=0` reads like two separate arguments —
+/// which is exactly the kind of ambiguity that makes build tooling untrustworthy.
+/// This is display only; execution always uses the argv vector unchanged.
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if a.is_empty() || a.contains(' ') || a.contains('"') || a.contains('\'') {
+                format!("\"{}\"", a.replace('"', "\\\""))
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("\n{} {:#}", util::red("error:"), e);
@@ -194,6 +242,9 @@ fn run() -> Result<()> {
         Command::Run(a) => cmd_build(&root, a, quiet, true),
         Command::Benchmark(a) => cmd_benchmark(&root, a, quiet),
         Command::Clean(a) => cmd_clean(&root, a, quiet),
+        Command::Host(_) => anyhow::bail!(
+            "`host` is internal: pass program arguments after `--` to `rusturbo run`, e.g.\n  rusturbo run -- host --port 9000"
+        ),
     }
 }
 
@@ -573,9 +624,14 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
         cargo_args.push("profile.dev.codegen-units=16".into());
     }
     cargo_args.extend(args.cargo_args.clone());
-    if execute_program && !args.passthrough.is_empty() {
-        cargo_args.push("--".into());
-        cargo_args.extend(args.passthrough.clone());
+    // When the user passes program arguments, RustTurbo builds with `cargo build` and
+    // launches the binary itself. `cargo run -- <args>` would work too, but driving the
+    // exec lets us forward exit codes and signals correctly and avoids a second parse of
+    // our own argv by Cargo.
+    if execute_program && !args.program_args.is_empty() {
+        if let Some(pos) = cargo_args.iter().position(|a| a == "run") {
+            cargo_args[pos] = "build".to_string();
+        }
     }
 
     let target_dir = cacheops::effective_target_dir(&plan, Path::new(&graph.target_dir));
@@ -583,7 +639,7 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
     if args.dry_run {
         report::header("RustTurbo dry run");
         println!("  {:22} {}", "cwd", root.display());
-        println!("  {:22} {}", "cargo", format!("{} {}", cacheops::cargo_bin(), cargo_args.join(" ")));
+        println!("  {:22} {}", "cargo", format!("{} {}", cacheops::cargo_bin(), shell_join(&cargo_args)));
         println!("  {:22} {}", "target dir", target_dir.display());
         println!("  {:22} {}", "linker", linker.selected.name());
         println!("  {:22} {}", "jobs", cfg.effective_jobs(hw.logical_cores, hw.ram_mb));
@@ -616,7 +672,7 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
             "{} {} {}",
             util::dim("»"),
             cacheops::cargo_bin(),
-            util::dim(&cargo_args.join(" "))
+            util::dim(&shell_join(&cargo_args))
         );
         if args.explain || !quiet {
             report::cache_note(hit, &format!("{:?} ({})", plan.reuse, plan.decision.reason));
@@ -631,7 +687,7 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
             anyhow::bail!(
                 "could not execute cargo: {e:#}\n  argv: {} {}\n  cwd: {}",
                 cacheops::cargo_bin(),
-                cargo_args.join(" "),
+                shell_join(&cargo_args),
                 root.display()
             );
         }
@@ -644,7 +700,7 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
             if execute_program { "run" } else { "build" },
             captured.status.code(),
             cacheops::cargo_bin(),
-            cargo_args.join(" "),
+            shell_join(&cargo_args),
             root.display(),
             tail
         );
@@ -679,6 +735,28 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
                 eprintln!("  {} cache publish skipped: {e}", util::yellow("!"));
             }
         }
+    }
+
+    if execute_program && !args.program_args.is_empty() {
+        let exe = cacheops::binary_path(
+            &target_dir,
+            &args.profile,
+            bin_name.as_deref().unwrap_or_default(),
+        );
+        if !exe.is_file() {
+            anyhow::bail!("built binary not found at {}", exe.display());
+        }
+        if !quiet {
+            eprintln!("{} {}", util::dim("»"), exe.display());
+        }
+        let (status, _) = process::run_inherit(
+            &exe.display().to_string(),
+            &args.program_args,
+            Some(root),
+            None,
+        )?;
+        // Propagate the program's exit code: this is a run, not a build.
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     if !quiet && !execute_program {
@@ -1057,4 +1135,64 @@ fn cmd_clean(root: &Path, args: CleanArgs, quiet: bool) -> Result<()> {
     }
     let _ = quiet;
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn shell_join_quotes_config_values() {
+        let args = vec![
+            "--config".to_string(),
+            "profile.dev.package.\"*\".debug=0".to_string(),
+        ];
+        let out = shell_join(&args);
+        // The value must be one quoted token, not two arguments.
+        assert!(out.starts_with("--config \"profile.dev.package."), "got {out}");
+        assert!(out.ends_with("=0\""), "got {out}");
+    }
+
+    #[test]
+    fn shell_join_leaves_simple_args_alone() {
+        let args = vec!["run".to_string(), "--profile".to_string(), "dev".to_string()];
+        assert_eq!(shell_join(&args), "run --profile dev");
+    }
+
+    #[test]
+    fn cli_parses_program_args_after_double_dash() {
+        // `rusturbo run -- --port 9000` must put `--port 9000` in program_args.
+        let cli = Cli::try_parse_from(["rusturbo", "run", "--", "--port", "9000"]).unwrap();
+        match cli.command {
+            Command::Run(a) => {
+                assert_eq!(a.program_args, vec!["--port", "9000"]);
+                assert!(a.cargo_args.is_empty());
+            }
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_cargo_args_before_double_dash() {
+        let cli = Cli::try_parse_from([
+            "rusturbo", "run", "--cargo-arg=--release", "--", "--port", "9000",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Run(a) => {
+                assert_eq!(a.cargo_args, vec!["--release"]);
+                assert_eq!(a.program_args, vec!["--port", "9000"]);
+            }
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn host_proxy_is_hidden_but_parses() {
+        let cli = Cli::try_parse_from(["rusturbo", "host", "--port", "9000"]).unwrap();
+        match cli.command {
+            Command::Host(h) => assert_eq!(h.args, vec!["--port", "9000"]),
+            _ => panic!("expected host"),
+        }
+    }
 }
