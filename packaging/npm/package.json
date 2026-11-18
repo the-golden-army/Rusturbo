@@ -1,6 +1,6 @@
 {
   "name": "rusturbo",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "RustTurbo \u2014 extreme Rust compilation accelerator. Install the native binary from GitHub Releases.",
   "bin": {
     "rusturbo": "bin/rusturbo.js"
