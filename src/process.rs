@@ -128,6 +128,29 @@ pub fn which(program: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Run a command with inherited stdio (used to launch the user's program, so its
+/// output is interactive and its exit status is observable).
+pub fn run_inherit(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    env: Option<&EnvPatch>,
+) -> Result<(ExitStatus, Duration)> {
+    let start = Instant::now();
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    if let Some(env) = env {
+        env.apply(&mut cmd);
+    }
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to spawn `{program}`"))?;
+    Ok((status, start.elapsed()))
+}
+
 /// Run a command, streaming its stderr line-by-line through `sink` while capturing
 /// stdout. Used for Cargo invocations so the user keeps progress feedback while we
 /// attribute timings.
