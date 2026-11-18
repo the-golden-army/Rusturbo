@@ -146,20 +146,17 @@ struct BuildArgs {
     /// Explain cache decisions in detail.
     #[arg(long)]
     explain: bool,
-    /// Extra arguments forwarded to the built program (after `--`).
-    #[arg(last = true)]
-    passthrough: Vec<String>,
     /// Extra arguments forwarded to the built program, e.g. `rusturbo run -- --port 9000`.
     ///
-    /// These are appended *after* Cargo's own `--`, so they reach the program and never
-    /// Cargo. Previously this field was declared `last = true`, which made clap treat
-    /// every `--` in the command line as the end of the flags — so `--cargo-arg` past
-    /// `--` was captured here and then forwarded to the program, not to Cargo.
-    #[arg(value_name = "PROGRAM_ARG")]
+    /// `last = true` means everything after the user's `--` lands here, and clap stops
+    /// interpreting flags from that point — which is what makes a program argument like
+    /// `--port` safe. There can be only one such positional per command, which is why
+    /// Cargo's own arguments use the `--cargo-arg` flag instead.
+    #[arg(last = true, value_name = "PROGRAM_ARG")]
     program_args: Vec<String>,
 
-    /// Extra arguments forwarded to Cargo itself, e.g. `rusturbo run -- -- --port 9000`
-    /// is not needed: use `--cargo-arg="--release"` style for Cargo.
+    /// Extra arguments forwarded to Cargo itself, e.g. `--cargo-arg=--release`.
+    /// Must appear *before* `--`; anything after it is a program argument.
     #[arg(long = "cargo-arg", value_name = "ARG")]
     cargo_args: Vec<String>,
 }
