@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# Standalone project: keeps `cargo install --git <repo>` unambiguous (only the
+# rusturbo binary lives in the workspace) and keeps Actix out of the tool's lockfile.
+[workspace]
+
 [dependencies]
 actix-web = "4"
 serde = { version = "1", features = ["derive"] }

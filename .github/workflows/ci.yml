@@ -31,7 +31,7 @@ jobs:
 
       - name: cargo check
         shell: bash
-        run: cargo check --all-targets --message-format=short 2>&1 | tee check.log
+        run: cargo check --workspace --all-targets --message-format=short 2>&1 | tee check.log
 
       # A binary crate should ship a Cargo.lock so release builds are reproducible and
       # `--locked` works. The sandbox this repo was bootstrapped in had no Rust
@@ -51,12 +51,12 @@ jobs:
 
       - name: Tests
         shell: bash
-        run: cargo test --all-targets 2>&1 | tee test.log
+        run: cargo test --workspace --all-targets 2>&1 | tee test.log
 
       - name: Clippy
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: cargo clippy --all-targets --message-format=short 2>&1 | tee clippy.log
+        run: cargo clippy --workspace --all-targets --message-format=short 2>&1 | tee clippy.log
 
       # Hosted log downloads are blocked from some environments; post the log tail as a
       # commit comment instead, which is readable through the REST API.
@@ -89,13 +89,27 @@ jobs:
         shell: bash
         run: cargo build --release --message-format=short 2>&1 | tee build.log
 
+      - name: cargo install resolves to exactly one binary package
+        shell: bash
+        run: |
+          # Regression: a demo crate in the workspace made the documented command fail
+          # with "multiple packages with binaries found".
+          cargo install --path . --root /tmp/install-check --locked 2>&1 | tee /tmp/install.log
+          /tmp/install-check/bin/rusturbo --version
+          OUT=$(cargo install --git . --dry-run 2>&1 || true)
+          echo "$OUT" | grep -qi "multiple packages" && {
+            echo "::error title=install-ambiguous::bare 'cargo install --git' still sees several binaries"
+            exit 1
+          }
+          echo "install command unambiguous"
+
       - name: init the demo project
         working-directory: demo/actix-hello
-        run: ../../target/release/rusturbo init --preset actix
+        run: $GITHUB_WORKSPACE/target/release/rusturbo init --preset actix
 
       - name: analyze
         working-directory: demo/actix-hello
-        run: ../../target/release/rusturbo analyze --output /tmp/analyze.json --json
+        run: $GITHUB_WORKSPACE/target/release/rusturbo analyze --output /tmp/analyze.json --json
 
       - name: capture environment
         working-directory: demo/actix-hello
@@ -114,9 +128,9 @@ jobs:
           set -o pipefail
           {
             echo "### rusturbo dry run"
-            ../../target/release/rusturbo build --explain --dry-run 2>&1 || true
+            $GITHUB_WORKSPACE/target/release/rusturbo build --explain --dry-run 2>&1 || true
             echo "### rusturbo build (real)"
-            ../../target/release/rusturbo build --explain 2>&1 || echo "BUILD_FAILED rc=$?"
+            $GITHUB_WORKSPACE/target/release/rusturbo build --explain 2>&1 || echo "BUILD_FAILED rc=$?"
           } > /tmp/turbo.log 2>&1
           cat /tmp/turbo.log
           if grep -q "BUILD_FAILED" /tmp/turbo.log; then
@@ -132,7 +146,7 @@ jobs:
         working-directory: demo/actix-hello
         shell: bash
         run: |
-          ../../target/release/rusturbo analyze | tee /tmp/analyze2.txt
+          $GITHUB_WORKSPACE/target/release/rusturbo analyze | tee /tmp/analyze2.txt
           grep -Eq "cache hit" /tmp/analyze2.txt
 
       - name: start the server and hit it
@@ -161,7 +175,7 @@ jobs:
 
       - name: benchmark (warm scenarios; cold download is opt-in)
         working-directory: demo/actix-hello
-        run: ../../target/release/rusturbo benchmark --scenarios cargo-warm-registry,rusturbo-warm --out bench
+        run: $GITHUB_WORKSPACE/target/release/rusturbo benchmark --scenarios cargo-warm-registry,rusturbo-warm --out bench
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -105,7 +105,7 @@ async function main() {
     try {
       execFileSync(
         "cargo",
-        ["install", "--git", `https://github.com/${REPO}`, "--tag", `v${VERSION}`],
+        ["install", "--git", `https://github.com/${REPO}`, "--tag", `v${VERSION}`, "rusturbo"],
         { stdio: "inherit" }
       );
       console.log("rusturbo: installed from source");
@@ -113,7 +113,7 @@ async function main() {
     } catch {
       console.warn(
         "rusturbo: falling back to a source build also failed.\n" +
-          `  Install Rust (https://rustup.rs) then run: cargo install --git https://github.com/${REPO}`
+          `  Install Rust (https://rustup.rs) then run:\n    cargo install --git https://github.com/${REPO} rusturbo`
       );
       return;
     }
