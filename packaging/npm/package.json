@@ -6,11 +6,14 @@
     "rusturbo": "bin/rusturbo.js"
   },
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "preinstall": "node -e \"try{const v=process.env.npm_config_user_agent?.match(/npm\\/(\\d+)/);if(v&&+v[1]>=12)console.warn('\\nrusturbo: npm 12+ blocks install scripts by default.\\n  If the binary was not downloaded, re-run with:\\n    npm install -g --allow-scripts=rusturbo\\n')}catch{}\"",
+    "rusturbo:install": "node install.js"
   },
   "files": [
     "bin/rusturbo.js",
     "install.js",
+    "lib/",
     "README.md"
   ],
   "keywords": [
@@ -40,7 +43,6 @@
     "arm64"
   ],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   }
 }

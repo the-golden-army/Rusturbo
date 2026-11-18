@@ -12,8 +12,12 @@ default-run = "rusturbo"
 name = "rusturbo"
 path = "src/main.rs"
 
+# Only the tool itself is a workspace member. The Actix demos are deliberately
+# standalone: `cargo install --git <repo>` installs every binary package it finds in the
+# workspace, so keeping a demo member here makes the bare command fail with
+# "multiple packages with binaries found: actix-hello, rusturbo".
 [workspace]
-members = ["demo/actix-hello"]
+members = ["."]
 resolver = "2"
 
 [dependencies]
