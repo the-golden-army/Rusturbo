@@ -519,36 +519,112 @@ fn build_env(
     Ok(env)
 }
 
-fn resolve_bin_name(graph: &metadata::GraphAnalysis, root: &Path, explicit: Option<&str>) -> Result<String> {
+/// One workspace member's binary targets, as reported by `cargo metadata`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinCandidate {
+    pub package: String,
+    pub bins: Vec<String>,
+    pub default_run: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinChoice {
+    Chosen(String),
+    /// Several plausible targets; the list is `package:bin` for the error message.
+    Ambiguous(Vec<String>),
+    /// No binary targets at all.
+    None,
+}
+
+/// Pick the binary Cargo would run, without guessing.
+///
+/// Rules, in order (mirroring Cargo's own precedence, but never silently picking one of
+/// several equals):
+///
+/// 1. A single `default-run` across the workspace wins — that is Cargo's explicit answer.
+/// 2. Exactly one member has binary targets: use its `default_run`, else its only bin.
+/// 3. Exactly one binary across all members: use it.
+/// 4. Otherwise report ambiguity with the full candidate list.
+///
+/// The bug this replaces: the previous implementation stopped at the *first* workspace
+/// member that had no binary target, so a workspace with a library crate (or a virtual
+/// manifest whose first member is a lib) failed with "could not determine a binary
+/// target" even though `cargo run` worked fine.
+pub fn choose_bin(candidates: &[BinCandidate]) -> BinChoice {
+    let with_bins: Vec<&BinCandidate> = candidates
+        .iter()
+        .filter(|c| !c.bins.is_empty())
+        .collect();
+
+    if with_bins.is_empty() {
+        return BinChoice::None;
+    }
+
+    let defaults: Vec<(&BinCandidate, &String)> = with_bins
+        .iter()
+        .filter_map(|c| c.default_run.as_ref().map(|d| (*c, d)))
+        .collect();
+    if defaults.len() == 1 {
+        return BinChoice::Chosen(defaults[0].1.clone());
+    }
+    if defaults.len() > 1 {
+        return BinChoice::Ambiguous(
+            defaults
+                .iter()
+                .map(|(c, d)| format!("{}:{}", c.package, d))
+                .collect(),
+        );
+    }
+
+    if with_bins.len() == 1 {
+        let only = with_bins[0];
+        if only.bins.len() == 1 {
+            return BinChoice::Chosen(only.bins[0].clone());
+        }
+    }
+
+    let all: Vec<String> = with_bins
+        .iter()
+        .flat_map(|c| c.bins.iter().map(move |b| format!("{}:{}", c.package, b)))
+        .collect();
+    if all.len() == 1 {
+        return BinChoice::Chosen(all[0].split_once(':').map(|(_, b)| b).unwrap_or(&all[0]).to_string());
+    }
+    BinChoice::Ambiguous(all)
+}
+
+fn resolve_bin_name(root: &Path, explicit: Option<&str>) -> Result<String> {
     if let Some(b) = explicit {
         return Ok(b.to_string());
     }
-    // Ask Cargo which binary the package would run: parse the default-run/bins from
-    // metadata through the analyzer's already-loaded metadata.
     let analyzer = metadata::Analyzer::load(root)?;
-    for p in analyzer.metadata.packages.iter() {
-        if !analyzer.metadata.workspace_members.contains(&p.id) {
-            continue;
-        }
-        let bins: Vec<&str> = p
-            .targets
-            .iter()
-            .filter(|t| t.kind.iter().any(|k| k.to_string() == "bin"))
-            .map(|t| t.name.as_str())
-            .collect();
-        if let Some(dr) = &p.default_run {
-            return Ok(dr.clone());
-        }
-        if bins.len() == 1 {
-            return Ok(bins[0].to_string());
-        }
-        if let Some(b) = bins.first() {
-            return Ok(b.to_string());
-        }
-        break;
+    let candidates: Vec<BinCandidate> = analyzer
+        .metadata
+        .packages
+        .iter()
+        .filter(|p| analyzer.metadata.workspace_members.contains(&p.id))
+        .map(|p| BinCandidate {
+            package: p.name.to_string(),
+            bins: p
+                .targets
+                .iter()
+                .filter(|t| t.kind.iter().any(|k| k.to_string() == "bin"))
+                .map(|t| t.name.clone())
+                .collect(),
+            default_run: p.default_run.clone(),
+        })
+        .collect();
+
+    match choose_bin(&candidates) {
+        BinChoice::Chosen(b) => Ok(b),
+        BinChoice::None => anyhow::bail!(
+            "no binary target in this workspace — `cargo run` would fail too. The package may be a library; add a \n  src/main.rs, a [[bin]] section, or run `rusturbo build` for the library."
+        ),
+        BinChoice::Ambiguous(list) => anyhow::bail!(
+            "several binary targets; pick one with --bin <name>:\n  {}\n  (`default-run` in Cargo.toml would settle it for plain `cargo run` too)",
+            list.join("\n  ")
+        ),
     }
-    let _ = graph;
-    anyhow::bail!("could not determine a binary target; pass --bin <name>")
 }
 
 fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -> Result<()> {
@@ -593,7 +669,7 @@ fn cmd_build(root: &Path, args: BuildArgs, quiet: bool, execute_program: bool) -
     )?;
 
     let bin_name = if execute_program {
-        Some(resolve_bin_name(&graph, root, args.bin.as_deref())?)
+        Some(resolve_bin_name(root, args.bin.as_deref())?)
     } else {
         None
     };
@@ -775,7 +851,7 @@ fn cmd_benchmark(root: &Path, args: BenchArgs, quiet: bool) -> Result<()> {
     let analyzer = metadata::Analyzer::load(root)?;
     let graph = analyzer.analyze(false)?;
     let linker = hardware::detect_linker(&cfg.linker.mode, &tc.host);
-    let bin_name = resolve_bin_name(&graph, root, None)?;
+    let bin_name = resolve_bin_name(root, None)?;
 
     let wanted: Vec<benchmark::Scenario> = if args.scenarios == "all" {
         benchmark::Scenario::all().to_vec()
@@ -1190,6 +1266,98 @@ mod cli_tests {
         match cli.command {
             Command::Host(h) => assert_eq!(h.args, vec!["--port", "9000"]),
             _ => panic!("expected host"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bin_choice_tests {
+    use super::*;
+
+    fn cand(pkg: &str, bins: &[&str], default_run: Option<&str>) -> BinCandidate {
+        BinCandidate {
+            package: pkg.to_string(),
+            bins: bins.iter().map(|b| b.to_string()).collect(),
+            default_run: default_run.map(|d| d.to_string()),
+        }
+    }
+
+    #[test]
+    fn single_crate_single_bin() {
+        assert_eq!(
+            choose_bin(&[cand("room", &["room"], None)]),
+            BinChoice::Chosen("room".into())
+        );
+    }
+
+    /// Regression: a workspace whose first member is a library made `rusturbo run` fail
+    /// with "could not determine a binary target" while `cargo run` worked.
+    #[test]
+    fn library_member_before_binary_member_is_skipped() {
+        let members = vec![
+            cand("ui-storm-lib", &[], None),      // lib only, iterated first
+            cand("ui-storm-server", &["server"], None),
+        ];
+        assert_eq!(choose_bin(&members), BinChoice::Chosen("server".into()));
+    }
+
+    #[test]
+    fn default_run_wins_over_bin_count() {
+        let members = vec![
+            cand("app", &["app", "worker"], Some("worker")),
+            cand("lib", &[], None),
+        ];
+        assert_eq!(choose_bin(&members), BinChoice::Chosen("worker".into()));
+    }
+
+    #[test]
+    fn single_bin_across_many_members() {
+        let members = vec![
+            cand("a", &[], None),
+            cand("b", &[], None),
+            cand("c", &["c-bin"], None),
+        ];
+        assert_eq!(choose_bin(&members), BinChoice::Chosen("c-bin".into()));
+    }
+
+    #[test]
+    fn several_members_with_several_bins_is_ambiguous_not_guessed() {
+        let members = vec![
+            cand("api", &["api"], None),
+            cand("web", &["web"], None),
+        ];
+        match choose_bin(&members) {
+            BinChoice::Ambiguous(list) => {
+                assert_eq!(list, vec!["api:api".to_string(), "web:web".to_string()]);
+            }
+            other => panic!("expected ambiguity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_default_runs_is_ambiguous() {
+        let members = vec![
+            cand("a", &["a1"], Some("a1")),
+            cand("b", &["b1"], Some("b1")),
+        ];
+        assert!(matches!(choose_bin(&members), BinChoice::Ambiguous(_)));
+    }
+
+    #[test]
+    fn no_binaries_reports_none() {
+        assert_eq!(
+            choose_bin(&[cand("lib", &[], None)]),
+            BinChoice::None
+        );
+        assert_eq!(choose_bin(&[]), BinChoice::None);
+    }
+
+    #[test]
+    fn multiple_bins_in_one_member_without_default_is_ambiguous() {
+        let members = vec![cand("app", &["one", "two"], None)];
+        match choose_bin(&members) {
+            BinChoice::Ambiguous(list) => assert_eq!(list.len(), 2),
+            other => panic!("expected ambiguity, got {other:?}"),
         }
     }
 }
